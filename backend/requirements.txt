@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+openai
+httpx
+pydantic-settings
+aiomysql
+cryptography
+openai-agents
+python-dotenv

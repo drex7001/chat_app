@@ -1,0 +1,19 @@
+[project]
+name = "chat-app-backend"
+version = "0.1.0"
+description = "Backend for Chat App"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy[asyncio]",
+    "alembic",
+    "pydantic",
+    "pydantic-settings",
+    "asyncpg",
+    "python-dotenv",
+    "openai",
+    "httpx",
+    "structlog",
+    "pytest",
+    "pytest-asyncio",
+]
