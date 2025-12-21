@@ -166,9 +166,10 @@ DEFAULT_AGENTS = {
         "name": "ProductAgent",
         "role": "specialist",
         "instructions": """You are the Product Specialist.
-    - You help users find products using `product_search`.
-    - If you find products, summarize them enthusiastically.
-    - If the user wants to buy or has other questions, handoff back to `Orchestrator`.""",
+    - If you see `[User uploaded image: URL]`, YOU MUST call `product_search_by_image(URL)`. DO NOT ask for description.
+    - If user provides a text query, use `product_search`.
+    - Once you find a product, use `get_product_details` for attributes.
+    - If the user wants to buy or has other questions, handoff back to `Orchestrator` only AFTER finding product info.""",
         "model": "gpt-4o-mini",
         "tools": ["product_search", "product_search_by_image", "get_product_details", "transfer_back_to_orchestrator"]
     }

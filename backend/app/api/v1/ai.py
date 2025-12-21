@@ -72,43 +72,36 @@ async def ai_message(
                 pass
         return tools
 
-    # Actually, to support handoffs correctly with dynamic agents, we need to create the functions dynamically
-    # that close over the 'agent_instances' dictionary.
-    
-    def create_handoff_tool(target_agent_name: str):
-        def handoff():
-            f"""Transfer conversation to {target_agent_name}."""
-            return agent_instances.get(target_agent_name)
-        
-        # Set dynamic name
-        handoff.__name__ = f"transfer_to_{target_agent_name}"
-        return function_tool(handoff)
-
-    # 1. Instantiate all agents
+    # 1. Instantiate all agents (without handoffs - will bind in second pass)
     for key, cfg in config_agents.items():
         agent_instances[key] = Agent(
             name=cfg["name"],
             instructions=cfg["instructions"],
             model=cfg["model"],
-            tools=[] # bind later
+            tools=[],  # bind later
+            handoffs=[]  # bind later
         )
         
-    # 2. Bind tools
+    # 2. Bind tools AND handoffs
     for key, cfg in config_agents.items():
         agent = agent_instances[key]
         tool_list = []
+        handoff_list = []
+        
         for t_name in cfg.get("tools", []):
             if t_name in TOOL_REGISTRY:
                 tool_list.append(TOOL_REGISTRY[t_name])
-            elif t_name.startswith("transfer_to_"):
-                target = t_name.replace("transfer_to_", "")
-                if target == "orchestrator": target = "orchestrator" # handle synonyms if needed
-                tool_list.append(create_handoff_tool(target))
-            elif t_name.startswith("transfer_back_to_"):
-                target = t_name.replace("transfer_back_to_", "")
-                tool_list.append(create_handoff_tool(target))
+            elif t_name.startswith("transfer_to_") or t_name.startswith("transfer_back_to_"):
+                # Extract target agent name
+                target = t_name.replace("transfer_to_", "").replace("transfer_back_to_", "")
+                target_agent = agent_instances.get(target)
+                if target_agent:
+                    handoff_list.append(target_agent)
+                else:
+                    print(f"Warning: Handoff target '{target}' not found in agent_instances")
                 
         agent.tools = tool_list
+        agent.handoffs = handoff_list
 
     # Get entry agent (orchestrator)
     if "orchestrator" not in agent_instances:

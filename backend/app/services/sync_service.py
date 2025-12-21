@@ -181,15 +181,27 @@ class SyncService:
             import os
             logger.info(f"Generating embedding for URL: {url}")
             
-            # OPTIMIZATION: Handle localhost/static urls as local files to avoid network self-calls
-            # (Fixes potential deadlock or connection issues during testing)
+            # OPTIMIZATION: Handle localhost/static urls OR relative paths as local files
             target_url = url
-            if "localhost" in url and "/static/" in url:
+            
+            # Case 1: Relative path /static/...
+            if url.startswith("/static/"):
+                 try:
+                    split_path = url.split("/static/")[-1] 
+                    local_path = os.path.join("app/static", split_path)
+                    if os.path.exists(local_path):
+                        target_url = local_path
+                        logger.info(f"Resolved relative URL {url} to local path {target_url}")
+                    else:
+                        logger.warning(f"Constructed local path {local_path} does not exist for relative URL {url}")
+                 except Exception as ex:
+                    logger.error(f"Error parsing relative URL: {ex}")
+
+            # Case 2: Absolute localhost URL
+            elif "localhost" in url and "/static/" in url:
                 # Extract relative path: http://localhost:8000/static/uploads/x.png -> app/static/uploads/x.png
-                # Assuming standard structure
                 try:
                     split_path = url.split("/static/")[-1]
-                    # Fix path separators for Windows if needed, though os.path.join handles it
                     local_path = os.path.join("app/static", split_path)
                     if os.path.exists(local_path):
                         target_url = local_path

@@ -23,6 +23,7 @@ async def check():
             
             p_agent = config.get("agents", {}).get("product_agent", {})
             print(f"Product Agent Tools: {p_agent.get('tools')}")
+            print(f"\nProduct Agent Instructions:\n{p_agent.get('instructions')}")
         else:
             print("Client not found")
 
