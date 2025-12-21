@@ -26,8 +26,10 @@ async def ai_message(
     client_service = __import__("app.domain.clients.service", fromlist=["ClientService"]).ClientService(db)
     
     # 0. Fetch Client Configuration
+    # 0. Fetch Client Configuration
     # Prioritize app_name if provided (as requested by user), fallback to client_external_id
-    client_id_to_lookup = getattr(request, "app_name", request.client_external_id) 
+    # Fix: getattr returns None if key exists but is None. Use logical OR.
+    client_id_to_lookup = request.app_name or request.client_external_id 
     # Note: request schema might need update if app_name isn't in it, but user sent json with it. 
     # Let's assume request schema has it or we access it from body if we changed schema.
     # Actually, simpler: define app_name alias in schema or just alias client_external_id. 
@@ -74,11 +76,13 @@ async def ai_message(
     # that close over the 'agent_instances' dictionary.
     
     def create_handoff_tool(target_agent_name: str):
-        @function_tool(name=f"transfer_to_{target_agent_name}")
         def handoff():
             f"""Transfer conversation to {target_agent_name}."""
             return agent_instances.get(target_agent_name)
-        return handoff
+        
+        # Set dynamic name
+        handoff.__name__ = f"transfer_to_{target_agent_name}"
+        return function_tool(handoff)
 
     # 1. Instantiate all agents
     for key, cfg in config_agents.items():
@@ -116,11 +120,23 @@ async def ai_message(
         entry_agent = agent_instances["orchestrator"]
 
     # 3. Prepare Input
-    messages = [{"role": "user", "content": request.text}]
+    # 3. Prepare Input
+    # OPTIMIZATION: We don't strictly need OpenAI Vision to search.
+    # We just need the Agent to know there is an image URL so it can call the tool.
+    # We apppend the URL to the text.
+    combined_text = request.text
+    if request.attachments:
+        for att in request.attachments:
+            if att.type == "image":
+                 combined_text += f"\n\n[User uploaded image: {att.url}]"
+            # Handle other types if needed
+    
+    messages = [{"role": "user", "content": combined_text}]
     
     # 4. Run Agent
     start_time = __import__("time").time()
-    result = await Runner.run(entry_agent, input=messages)
+    # Revert max_turns to 10 as requested
+    result = await Runner.run(entry_agent, input=messages, max_turns=10)
     final_reply = result.final_output
     
     latency = int((__import__("time").time() - start_time) * 1000)

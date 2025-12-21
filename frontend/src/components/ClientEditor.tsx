@@ -12,6 +12,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { toast } from "sonner"
 import AgentList from './AgentList';
 import AgentEditor from './AgentEditor';
+import ProductList from './ProductList';
 
 const DEFAULT_CONFIG: ClientConfig = { agents: {} };
 const DEFAULT_POLICIES: PolicyConfig = { documents: [], rules: {} };
@@ -181,6 +182,7 @@ const ClientEditor: React.FC = () => {
             <Tabs defaultValue="details" className="space-y-4">
                 <TabsList>
                     <TabsTrigger value="details">Details</TabsTrigger>
+                    <TabsTrigger value="products">Products</TabsTrigger>
                     <TabsTrigger value="agents">Agents</TabsTrigger>
                     <TabsTrigger value="policies">Policies</TabsTrigger>
                 </TabsList>
@@ -204,6 +206,15 @@ const ClientEditor: React.FC = () => {
                             </div>
                         </CardContent>
                     </Card>
+                </TabsContent>
+
+                {/* Products Tab */}
+                <TabsContent value="products">
+                    {!isNew && id ? (
+                        <ProductList clientId={parseInt(id)} />
+                    ) : (
+                        <div className="text-center py-10 text-gray-500">Please save the client first to manage products.</div>
+                    )}
                 </TabsContent>
 
                 {/* Agents Tab */}

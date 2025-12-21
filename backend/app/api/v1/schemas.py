@@ -1,5 +1,9 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+
+class Attachment(BaseModel):
+    url: str
+    type: str = "image" # image, file, audio
 
 class AIMessageRequest(BaseModel):
     message_id: str
@@ -8,6 +12,7 @@ class AIMessageRequest(BaseModel):
     app_name: Optional[str] = None # Add this alias/field
     sender_type: str = "customer" # customer, agent
     text: str
+    attachments: Optional[List[Attachment]] = None
     metadata: Optional[Dict[str, Any]] = None
 
 class AIMessageResponse(BaseModel):

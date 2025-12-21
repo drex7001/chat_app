@@ -1,0 +1,6 @@
+Successfully connected to Milvus (Alias: default)
+DEBUG: MILVUS_URI is: https://in03-9b584d9c36dbe0b.serverless.aws-eu-central-1.cloud.zilliz.com
+DEBUG: MILVUS_TOKEN is: *****
+Testing product_search_by_image logic with http://localhost:8000/static/uploads/search.png
+1. Embedding Image...
+Caught exception: 'SyncService' object has no attribute 'embed_image_url'

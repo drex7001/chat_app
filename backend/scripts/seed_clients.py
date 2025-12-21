@@ -16,65 +16,80 @@ from sqlalchemy import select, text
 DEFAULT_AGENTS = {
     "orchestrator": {
         "name": "Orchestrator",
-        "instructions": "You are a main receptionist for {company_name}. Your role is to greet customers and direct them to the appropriate agent.",
-        "model": "gpt-4",
-        "temperature": 0.7
+        "instructions": """You are a main receptionist for {company_name}. 
+    - Answer greetings and FAQs using `kb_search`.
+    - If user asks about a specific order, handoff to `OrderAgent`.
+    - If user asks about shipping/tracking, handoff to `ShippingAgent`.
+    - If user provided an IMAGE `[User uploaded image: ...]` or asks about products, handoff to `ProductAgent`.
+    - Always be polite.""",
+        "model": "gpt-4o-mini",
+        "tools": ["kb_search", "transfer_to_order_agent", "transfer_to_shipping_agent", "transfer_to_product_agent"]
     },
     "order_agent": {
         "name": "Order Specialist",
-        "instructions": "You are the Order Specialist for {company_name}. You can view order details and assist with order inquiries.",
-        "model": "gpt-4",
-        "temperature": 0.7
+        "instructions": "You are the Order Specialist for {company_name}. You can view order details and assist with order inquiries, or handoff back to Orchestrator.",
+        "model": "gpt-4o-mini",
+        "tools": ["get_order_details", "transfer_back_to_orchestrator"]
     },
     "shipping_agent": {
         "name": "Shipping Specialist",
         "instructions": "You are the Shipping Specialist for {company_name}. You handle address changes and shipping status checks.",
-        "model": "gpt-4",
-        "temperature": 0.7
+        "model": "gpt-4o-mini",
+        "tools": ["get_order_details", "transfer_back_to_orchestrator"]
+    },
+    "product_agent": {
+        "name": "Product Specialist",
+        "instructions": """You are the Product Specialist for {company_name}.
+    - If you see `[User uploaded image: URL]`, YOU MUST call `product_search_by_image(URL)`. DO NOT Ask for description.
+    - If user provides text query, use `product_search`.
+    - Once you find a product, use `get_product_details` for attributes.
+    - If the user wants to buy or has other questions, handoff back to `Orchestrator` only AFTER finding product info.""",
+        "model": "gpt-4o-mini",
+        "tools": ["product_search", "product_search_by_image", "get_product_details", "transfer_back_to_orchestrator"]
     }
 }
 
 # New structure for client data, including agent configurations
 # Assigning all agents to all clients for now to ensure they are visible
 CLIENTS = [
-    {"name": "Sania Maskatiya", "external_id": "sania", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Momina Teli", "external_id": "momina", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Leila", "external_id": "leila", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Asim Jofa", "external_id": "asimjofa", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "SAHAR Online", "external_id": "saharonline", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "LALS", "external_id": "lals", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "SUNNIA MANAHIL", "external_id": "manahil", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Nadia Farooqui", "external_id": "nadia", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Nida Azwer Atelier", "external_id": "nidaazwer", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Miaasa", "external_id": "miaasa", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "The Chyll Store", "external_id": "chyll", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Nimra Kashif", "external_id": "nimrakashif", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Spring & Summer", "external_id": "sns", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Zigzag (Pvt.) Ltd", "external_id": "zigzag", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Neeks Closet", "external_id": "neekscloset", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Arienti Pvt Ltd", "external_id": "arienti", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Zainab Chottani", "external_id": "zainabchottani", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Noorma Kaamal", "external_id": "noormakaamal", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "WARDHA SALEEM", "external_id": "wardhasaleem", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Amna Arshad", "external_id": "amnaarshad", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Umsha by Uzma Babar", "external_id": "umsha", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Sumaira Khanani", "external_id": "sumairakhanani", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Sunday Linens", "external_id": "sundaylinen", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Zuri by Zainab Fawad", "external_id": "zuribyzainabfawad", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Little Pineapple", "external_id": "littlepineapple", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Sapphire Retail Limited (SRL)", "external_id": "sapphire", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Tiya", "external_id": "tiya", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Online Bazaar", "external_id": "onlinebazaar", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Shamsha Hashwani", "external_id": "shamshahashwani", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Mina Hasan", "external_id": "mina", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Bonanza Satrangi", "external_id": "bonanza", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Ayesha Ibrahim", "external_id": "ayesha", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Murk", "external_id": "murk", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Sarah Sheeraz", "external_id": "sarah", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Kiki & Boo", "external_id": "kiki", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Nizka Couture", "external_id": "nizka", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Vi’da New York", "external_id": "vida", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
-    {"name": "Shamaeel Ansari", "external_id": "shamaeel", "agents": ["orchestrator", "order_agent", "shipping_agent"]},
+    {"name": "Sania Maskatiya", "external_id": "sania", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Momina Teli", "external_id": "momina", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Leila", "external_id": "leila", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Asim Jofa", "external_id": "asimjofa", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "SAHAR Online", "external_id": "saharonline", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "LALS", "external_id": "lals", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "SUNNIA MANAHIL", "external_id": "manahil", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Nadia Farooqui", "external_id": "nadia", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Nida Azwer Atelier", "external_id": "nidaazwer", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Miaasa", "external_id": "miaasa", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "The Chyll Store", "external_id": "chyll", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Nimra Kashif", "external_id": "nimrakashif", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Spring & Summer", "external_id": "sns", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Zigzag (Pvt.) Ltd", "external_id": "zigzag", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Neeks Closet", "external_id": "neekscloset", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Arienti Pvt Ltd", "external_id": "arienti", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Zainab Chottani", "external_id": "zainabchottani", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Noorma Kaamal", "external_id": "noormakaamal", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "WARDHA SALEEM", "external_id": "wardhasaleem", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Amna Arshad", "external_id": "amnaarshad", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Umsha by Uzma Babar", "external_id": "umsha", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Sumaira Khanani", "external_id": "sumairakhanani", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Sunday Linens", "external_id": "sundaylinen", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Zuri by Zainab Fawad", "external_id": "zuribyzainabfawad", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Little Pineapple", "external_id": "littlepineapple", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Sapphire Retail Limited (SRL)", "external_id": "sapphire", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Tiya", "external_id": "tiya", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Online Bazaar", "external_id": "onlinebazaar", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Shamsha Hashwani", "external_id": "shamshahashwani", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Mina Hasan", "external_id": "mina", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Bonanza Satrangi", "external_id": "bonanza", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Ayesha Ibrahim", "external_id": "ayesha", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Murk", "external_id": "murk", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Sarah Sheeraz", "external_id": "sarah", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Kiki & Boo", "external_id": "kiki", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Nizka Couture", "external_id": "nizka", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Vi’da New York", "external_id": "vida", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
+    {"name": "Shamaeel Ansari", "external_id": "shamaeel", "agents": ["orchestrator", "order_agent", "shipping_agent", "product_agent"]},
 ]
 
 async def seed():

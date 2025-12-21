@@ -1,0 +1,1 @@
+[{'product_id': 6986622763061, 'store_id': 22, 'vote_count': 6, 'best_score': 0.9694315791130066}, {'product_id': 6986607296565, 'store_id': 22, 'vote_count': 4, 'best_score': 0.7365514039993286}]
