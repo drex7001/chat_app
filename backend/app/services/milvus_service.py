@@ -171,9 +171,11 @@ class MilvusService:
             pid = hit.entity.get("product_id")
             score = hit.score
             
-            product_votes[pid] += 1
-            product_scores[pid] = max(product_scores[pid], score) # Keep best score
-            product_stores[pid] = hit.entity.get("store_id")
+            # Only include if similarity >= 50% to filter out weak matches
+            if score >= 0.5:
+                product_votes[pid] += 1
+                product_scores[pid] = max(product_scores[pid], score) # Keep best score
+                product_stores[pid] = hit.entity.get("store_id")
             
         # Sort by Votes (Validation), then Score (Similarity)
         ranked_products = sorted(

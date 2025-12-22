@@ -92,18 +92,19 @@ async def product_search_by_image(ctx: RunContextWrapper[ClientContext], image_u
     results = await milvus_service.search_image(app_name, vector)
     
     if not results:
-        return "No matching products found."
+        return "No matching products found. The image may not match any products in our catalog."
         
-    # Format
-    info = []
-    for r in results:
-        info.append(f"Product ID: {r['product_id']}, Score: {r['best_score']:.2f}, Store: {r['store_id']}")
-        
-    return "\n".join(info)
+    # Only return the BEST match - prevents agent from fetching multiple products
+    best = results[0]
+    match_quality = "HIGH" if best['best_score'] >= 0.7 else "MEDIUM" if best['best_score'] >= 0.5 else "LOW"
+    
+    print(f"DEBUG: Best match - Product {best['product_id']} with score {best['best_score']:.2f}")
+    
+    return f"Best Match: Product ID {best['product_id']}, Similarity: {best['best_score']:.0%} ({match_quality}), Store ID: {best['store_id']}"
 
 @function_tool
 async def get_product_details(ctx: RunContextWrapper[ClientContext], product_id: str, store_id: int):
-    """Get live product details (price, stock) from Shopify given Product ID and Store ID."""
+    """Get live product details (price, stock, currency) from Shopify given Product ID and Store ID."""
     # 1. Get Creds using client context
     app_name = ctx.context.app_name
     stores = await admin_client.get_shopify_credentials(app_name)
@@ -119,15 +120,42 @@ async def get_product_details(ctx: RunContextWrapper[ClientContext], product_id:
     
     if not product:
         return "Product not found in Shopify."
+    
+    # 4. Get shop info for currency
+    shop_info = shopify_client.get_shop_info()
+    currency = shop_info.get("currency", "USD")
         
-    # 4. Format Info
-    # Get range of prices if variants differ
-    prices = [v.price for v in product.variants]
-    price_str = prices[0] if prices else "N/A"
-    if len(prices) > 1 and len(set(prices)) > 1:
-        price_str = f"{min(prices)} - {max(prices)}"
+    # 5. Calculate price range
+    prices = [float(v.price) for v in product.variants if v.price]
+    if prices:
+        min_price, max_price = min(prices), max(prices)
+        if min_price == max_price:
+            price_str = f"{currency} {min_price:,.2f}"
+        else:
+            price_str = f"{currency} {min_price:,.2f} - {max_price:,.2f}"
+    else:
+        price_str = "Price not available"
+    
+    # 6. Calculate stock
+    stock_quantities = [v.inventory_quantity for v in product.variants if v.inventory_quantity is not None]
+    total_stock = sum(stock_quantities) if stock_quantities else None
+    
+    if total_stock is None:
+        stock_status = "Stock info not available"
+    elif total_stock <= 0:
+        stock_status = "OUT_OF_STOCK"
+    elif total_stock < 5:
+        stock_status = f"LOW_STOCK ({total_stock} left)"
+    else:
+        stock_status = f"IN_STOCK ({total_stock} available)"
+    
+    # 7. Build proper URL using handle (not product ID)
+    if product.handle:
+        product_url = f"https://{target_store.shop_url}/products/{product.handle}"
+    else:
+        product_url = f"https://{target_store.shop_url}/products/{product.id}"
         
-    return f"Title: {product.title}\nPrice: {price_str}\nStatus: {product.status}\nURL: https://{target_store.shop_url}/products/{product.id}"
+    return f"Title: {product.title}\nPrice: {price_str}\nStock: {stock_status}\nStatus: {product.status}\nURL: {product_url}"
 
 # --- Handoff Stubs (will receive full agent objects at runtime if needed, 
 # but simply returning the agent name/object is handled by the framework usually) ---
@@ -141,12 +169,19 @@ async def get_product_details(ctx: RunContextWrapper[ClientContext], product_id:
 # But the SDK usually requires returning the Agent object.
 
 # We will define mapped tools here.
+
+@function_tool
+def transfer_to_human(ctx: RunContextWrapper[ClientContext]):
+    """Transfer the conversation to a human agent when customer explicitly requests human support."""
+    return "HANDOFF_TO_HUMAN: Customer has requested to speak with a human agent. The conversation will be transferred to a human support representative who will assist shortly."
+
 TOOL_REGISTRY = {
     "get_order_details": get_order_details,
     "kb_search": kb_search,
     "product_search": product_search,
     "product_search_by_image": product_search_by_image,
     "get_product_details": get_product_details,
+    "transfer_to_human": transfer_to_human,
 }
 
 # We need separate handoff resolution in AI service or use a factory.
@@ -189,7 +224,11 @@ DEFAULT_AGENTS = {
         "instructions": """You are the Product Specialist.
     - If you see `[User uploaded image: URL]`, YOU MUST call `product_search_by_image(URL)`. DO NOT ask for description.
     - If user provides a text query, use `product_search`.
-    - Once you find a product, use `get_product_details` for attributes.
+    - IMPORTANT: Focus on the BEST MATCH (Match 1 with highest similarity) FIRST.
+    - Only call `get_product_details` for the TOP 1 result initially.
+    - Present the best matching product to the user. Only show alternatives if:
+      a) User asks for more options, OR
+      b) The best match is unavailable/out of stock
     - If the user wants to buy or has other questions, handoff back to `Orchestrator` only AFTER finding product info.""",
         "model": "gpt-4o-mini",
         "tools": ["product_search", "product_search_by_image", "get_product_details", "transfer_back_to_orchestrator"]

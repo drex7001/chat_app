@@ -153,12 +153,14 @@ class ShopifyClient:
                 title=getattr(v, 'title', ''), 
                 price=getattr(v, 'price', '0.00'), 
                 sku=getattr(v, 'sku', ''), 
-                position=getattr(v, 'position', 0)
+                position=getattr(v, 'position', 0),
+                inventory_quantity=getattr(v, 'inventory_quantity', None)
             ) for v in p.variants
         ]
         return ShopifyProduct(
             id=p.id, 
             title=p.title, 
+            handle=getattr(p, 'handle', None),  # For proper URLs
             body_html=getattr(p, 'body_html', ''), 
             created_at=p.created_at, 
             updated_at=p.updated_at, 
@@ -168,3 +170,21 @@ class ShopifyClient:
             images=images, 
             variants=variants
         )
+
+    def get_shop_info(self) -> dict:
+        """
+        Get shop info including currency.
+        """
+        self._activate_session()
+        try:
+            shop = shopify.Shop.current()
+            return {
+                "name": shop.name,
+                "currency": getattr(shop, 'currency', 'USD'),
+                "money_format": getattr(shop, 'money_format', '{{amount}}')
+            }
+        except Exception as e:
+            print(f"Error getting shop info: {e}")
+            return {"currency": "USD", "money_format": "{{amount}}"}
+        finally:
+            self._clear_session()
