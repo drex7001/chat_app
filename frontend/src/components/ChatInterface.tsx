@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, Mic, Paperclip, X, Image as ImageIcon, Loader2 } from 'lucide-react';
-import { getClients, sendMessage, uploadFile } from '../api';
+import { getClients, sendMessage, uploadFile, transcribeAudio } from '../api';
 // If UI components don't exist, I'll use standard HTML/Tailwind for now to avoid specific lib dependency issues if not fully set up.
 // Actually, package.json has @radix-ui, so likely shadcn. I'll stick to raw tailwind for speed/stability unless I see the components dir.
 // I saw components/ui dir earlier.
@@ -68,12 +68,21 @@ const ChatInterface: React.FC = () => {
         setIsLoading(true);
 
         try {
+            // Build chat history from previous messages
+            const chatHistory = messages
+                .filter(m => !m.text.startsWith('⚠️ Error')) // Filter out local error messages
+                .map(m => ({
+                    role: m.role === 'user' ? 'user' : 'assistant',
+                    content: m.text
+                }));
+
             const payload = {
                 message_id: `msg-${Date.now()}`,
                 thread_id: `thread-${selectedClient}-user`, // Simple thread ID for demo
                 client_external_id: selectedClient,
                 text: userMsg.text,
                 attachments: userMsg.attachments,
+                chat_history: chatHistory,
             };
 
             const response = await sendMessage(payload);
@@ -128,14 +137,22 @@ const ChatInterface: React.FC = () => {
 
             mediaRecorderRef.current.onstop = async () => {
                 const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+                // Note: OpenAI Whisper works best with mp3/wav/webm
                 const file = new File([blob], "voice_message.webm", { type: 'audio/webm' });
 
                 setIsLoading(true);
                 try {
-                    const result = await uploadFile(file);
-                    setAttachments((prev) => [...prev, { url: result.url, type: 'audio' }]);
+                    // Transcribe-First Architecture
+                    // 1. Send audio to backend
+                    const result = await transcribeAudio(file); // Returns { text: "..." }
+
+                    // 2. Put text in input box for user review
+                    if (result.text) {
+                        setInputText(prev => prev ? `${prev} ${result.text}` : result.text);
+                    }
                 } catch (err) {
-                    console.error("Voice upload failed", err);
+                    console.error("Voice transcription failed", err);
+                    alert("Transcription failed");
                 } finally {
                     setIsLoading(false);
                 }

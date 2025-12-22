@@ -1,9 +1,10 @@
-from agents import Agent, function_tool
+from agents import Agent, function_tool, RunContextWrapper
 from app.domain.ops.client import ops_client
 from app.services.milvus_service import milvus_service
 from app.services.sync_service import sync_service
 from app.domain.admin.client import admin_client
 from app.domain.shopify.client import ShopifyClient
+from app.domain.agents.context import ClientContext
 # from app.core.llm import llm_client
 
 # --- Tool Functions ---
@@ -14,36 +15,54 @@ async def get_order_details(order_id: str):
     return await ops_client.get_order(order_id)
 
 @function_tool
-def kb_search(query: str):
-    """Search knowledge base."""
-    # Stub
-    # Stub
-    return "Policies: Returns allowed within 30 days. Shipping takes 3-5 days."
+def kb_search(ctx: RunContextWrapper[ClientContext], query: str):
+    """Search knowledge base for policy information, FAQs, and company guidelines."""
+    policies = ctx.context.policies
+    documents = policies.get("documents", [])
+    
+    if not documents:
+        return "No policy documents available for this client."
+    
+    # Search for relevant documents
+    query_lower = query.lower()
+    query_words = query_lower.split()
+    
+    # Score each document by keyword matches
+    scored_docs = []
+    for doc in documents:
+        content = doc.get("content", "").lower()
+        name = doc.get("name", "").lower()
+        
+        # Count matching words
+        score = sum(1 for word in query_words if word in content or word in name)
+        if score > 0:
+            scored_docs.append((score, doc))
+    
+    # Sort by score (highest first)
+    scored_docs.sort(key=lambda x: x[0], reverse=True)
+    
+    if scored_docs:
+        # Return matching documents
+        results = []
+        for score, doc in scored_docs[:3]:  # Top 3 matches
+            results.append(f"**{doc['name']}**: {doc['content']}")
+        return "\n\n".join(results)
+    
+    # No direct matches - return all policies as fallback context
+    all_policies = [f"**{d['name']}**: {d['content']}" for d in documents]
+    return "Available policies:\n\n" + "\n\n".join(all_policies)
 
 @function_tool
-async def product_search(query: str):
+async def product_search(ctx: RunContextWrapper[ClientContext], query: str):
     """Search for products using natural language (e.g. 'blue summer dress')."""
     # 1. Embed Query
     vector = sync_service.embed_text(query)
     if not vector:
         return "Error: Could not process search query."
     
-    # 2. Search Milvus
-    # We need to search across ALL clients? Or the current client?
-    # Context: The Agent is running for a specific client (loaded in ai.py).
-    # However, 'milvus_service.search_image' requires 'client_name'.
-    # IMPORTANT: We need the context of "which client is this?" 
-    # For now, we'll hardcode or inject. 
-    # Actually, the 'function_tool' context injection isn't setup.
-    # We'll assume for this SINGLE TENANT DEMO usage or pass it.
-    # WAIT: ai.py loads for a specific client.
-    # But how does the tool know?
-    # For this specific user request (building "our product search agent"), 
-    # let's assume 'sania' or handle generic.
-    # Real solution: Tool context injection. 
-    # Hack for now: Search 'sania' since user explicitly asked for 'sania_products'.
-    
-    results = await milvus_service.search_image("sania", vector)
+    # 2. Search Milvus using client context
+    app_name = ctx.context.app_name
+    results = await milvus_service.search_image(app_name, vector)
     
     if not results:
         return "No matching products found."
@@ -56,19 +75,21 @@ async def product_search(query: str):
     return "\n".join(info)
 
 @function_tool
-async def product_search_by_image(image_url: str):
+async def product_search_by_image(ctx: RunContextWrapper[ClientContext], image_url: str):
     """Search for products using an image URL."""
-    print(f"DEBUG: product_search_by_image called with {image_url}")
+    app_name = ctx.context.app_name
+    print(f"DEBUG: product_search_by_image called with {image_url} for client {app_name}")
+    
     # 1. Embed Image
     vector = await sync_service.embed_image_url(image_url)
     if not vector:
         print("DEBUG: Embedding failed")
         return "Error: Could not process image from URL."
     
-    print("DEBUG: Embedding successful, searching Milvus...")
+    print(f"DEBUG: Embedding successful, searching Milvus for {app_name}...")
     
-    # 2. Search Milvus (assuming current client context 'sania' for now)
-    results = await milvus_service.search_image("sania", vector)
+    # 2. Search Milvus using client context
+    results = await milvus_service.search_image(app_name, vector)
     
     if not results:
         return "No matching products found."
@@ -81,11 +102,11 @@ async def product_search_by_image(image_url: str):
     return "\n".join(info)
 
 @function_tool
-async def get_product_details(product_id: str, store_id: int):
+async def get_product_details(ctx: RunContextWrapper[ClientContext], product_id: str, store_id: int):
     """Get live product details (price, stock) from Shopify given Product ID and Store ID."""
-    # 1. Get Creds (Accessing 'sania' or passing client context? We'll assume 'sania' for the demo agent)
-    client_app_name = "sania" 
-    stores = await admin_client.get_shopify_credentials(client_app_name)
+    # 1. Get Creds using client context
+    app_name = ctx.context.app_name
+    stores = await admin_client.get_shopify_credentials(app_name)
     
     # 2. Find Store
     target_store = next((s for s in stores if s.id == int(store_id)), None)

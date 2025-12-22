@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, Save, Plus, Trash2 } from 'lucide-react';
-import { getClient, createClient, updateClient } from '../api';
+import { ArrowLeft, Save, Plus, Trash2, Upload } from 'lucide-react';
+import { getClient, createClient, updateClient, uploadPolicyDocument } from '../api';
 import type { Client, ClientConfig, PolicyConfig, AgentConfig, PolicyDocument } from '../types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,6 +31,9 @@ const ClientEditor: React.FC = () => {
     // Agent Editing State
     const [editingAgentKey, setEditingAgentKey] = useState<string | null>(null);
     const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
+
+    // File upload ref
+    const policyFileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         if (!isNew && id) {
@@ -158,6 +161,28 @@ const ClientEditor: React.FC = () => {
         setPolicies({ ...policies, documents: newDocs });
     };
 
+    const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (!file) return;
+
+        try {
+            const result = await uploadPolicyDocument(file);
+            setPolicies({
+                ...policies,
+                documents: [...policies.documents, { name: result.name, content: result.content }]
+            });
+            toast.success(`Uploaded: ${result.original_filename}`);
+        } catch (error: any) {
+            console.error('Upload failed', error);
+            toast.error(error.response?.data?.detail || 'Failed to upload file');
+        }
+
+        // Reset input
+        if (policyFileInputRef.current) {
+            policyFileInputRef.current.value = '';
+        }
+    };
+
     return (
         <div className="p-8 max-w-6xl mx-auto space-y-8">
             {/* Header */}
@@ -262,6 +287,16 @@ const ClientEditor: React.FC = () => {
                             ))}
                             <Button variant="outline" onClick={handleAddDocument} className="w-full">
                                 <Plus className="mr-2 h-4 w-4" /> Add Document
+                            </Button>
+                            <input
+                                type="file"
+                                ref={policyFileInputRef}
+                                onChange={handleFileUpload}
+                                accept=".txt,.md,.pdf,.docx,.doc"
+                                className="hidden"
+                            />
+                            <Button variant="outline" onClick={() => policyFileInputRef.current?.click()} className="w-full">
+                                <Upload className="mr-2 h-4 w-4" /> Upload File (.txt, .md, .pdf, .docx)
                             </Button>
                         </CardContent>
                     </Card>

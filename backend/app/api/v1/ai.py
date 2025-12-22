@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from app.db.session import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.schemas import AIMessageRequest, AIMessageResponse
 from app.domain.conversations.service import ConversationService
+from app.domain.clients.service import ClientService
 from app.domain.crm.client import crm_client
 from app.domain.ai_runs.service import AIRunService
 from app.domain.ai_runs.models import RunStatus
 from app.domain.agents.definition import TOOL_REGISTRY, DEFAULT_AGENTS
+from app.domain.agents.context import ClientContext
 from agents import Runner
 import json
 
@@ -22,141 +24,160 @@ async def ai_message(
     Main entry point for CRM messages.
     Uses OpenAI Agents SDK with Stateless Injection.
     """
-    service = ConversationService(db)
-    client_service = __import__("app.domain.clients.service", fromlist=["ClientService"]).ClientService(db)
-    
-    # 0. Fetch Client Configuration
-    # 0. Fetch Client Configuration
-    # Prioritize app_name if provided (as requested by user), fallback to client_external_id
-    # Fix: getattr returns None if key exists but is None. Use logical OR.
-    client_id_to_lookup = request.app_name or request.client_external_id 
-    # Note: request schema might need update if app_name isn't in it, but user sent json with it. 
-    # Let's assume request schema has it or we access it from body if we changed schema.
-    # Actually, simpler: define app_name alias in schema or just alias client_external_id. 
-    
-    # For now, let's stick to client_external_id but map app_name to it if present.
-    # We will search by external_id.
-    client = await client_service.get_client_by_external_id(client_id_to_lookup)
-    if not client:
-        raise HTTPException(status_code=404, detail=f"Client '{client_id_to_lookup}' not found")
-        
-    # 1. Get/Create Conversation
-    conversation = await service.get_or_create_conversation(request.thread_id, request.client_external_id)
-    
-    # 2. Reconstruct Agents from Config
-    from agents import Agent, function_tool
-    from app.domain.agents.definition import TOOL_REGISTRY
-    
-    agent_instances = {}
-    config_agents = client.config.get("agents", {})
-    
-    # First pass: Create Agent instances (without handoff tools first to avoid circular dep issues if using direct refs, 
-    # but with SDK we might need a workaround for 'handoff' tools if they return objects)
-    # For now, we assume handoff tools are generic or resolved by name.
-    
-    # Helper to resolve tools
-    def resolve_tools(tool_names):
-        tools = []
-        for name in tool_names:
-            if name in TOOL_REGISTRY:
-                tools.append(TOOL_REGISTRY[name])
-            elif name.startswith("transfer_to_"):
-                # Dynamic Handoff Tool Factory
-                target_name = name.replace("transfer_to_", "")
-                # We need to ensure target_name exists in our instances map later?
-                # Actually, the 'function_tool' decorator needs the function at definition time.
-                # A workaround is to define a generic transfer tool.
-                
-                # For this iteration, we will use a closure if possible, or bind names.
-                # OpenAI Swarm/Agents usually requires returning the Agent object.
-                pass
-        return tools
+    # Debug output
+    client_id_to_use = request.client_external_id or request.app_name
+    print(f"DEBUG: Processing message for {client_id_to_use}")
 
-    # 1. Instantiate all agents (without handoffs - will bind in second pass)
-    for key, cfg in config_agents.items():
-        agent_instances[key] = Agent(
-            name=cfg["name"],
-            instructions=cfg["instructions"],
-            model=cfg["model"],
-            tools=[],  # bind later
-            handoffs=[]  # bind later
+    try:
+        # 0. Services
+        service = ConversationService(db)
+        client_service = ClientService(db)
+
+        # 1. Identify Client
+        client = await client_service.get_client_by_external_id(client_id_to_use)
+        if not client:
+            raise HTTPException(status_code=404, detail=f"Client '{client_id_to_use}' not found")
+
+        # 2. Get/Create Conversation
+        conversation = await service.get_or_create_conversation(request.thread_id, client.external_id)
+
+        # 3. Context
+        client_context = ClientContext(
+            app_name=client.external_id,
+            policies=client.policies or {}
         )
+
+        # 4. Reconstruct Agents from Config (Dynamic Loading)
+        from agents import Agent
         
-    # 2. Bind tools AND handoffs
-    for key, cfg in config_agents.items():
-        agent = agent_instances[key]
-        tool_list = []
-        handoff_list = []
+        agent_instances = {}
+        # Use client config if available, else fallback to DEFAULT_AGENTS
+        source_config = client.config.get("agents", {}) if client.config and client.config.get("agents") else DEFAULT_AGENTS
         
-        for t_name in cfg.get("tools", []):
-            if t_name in TOOL_REGISTRY:
-                tool_list.append(TOOL_REGISTRY[t_name])
-            elif t_name.startswith("transfer_to_") or t_name.startswith("transfer_back_to_"):
-                # Extract target agent name
-                target = t_name.replace("transfer_to_", "").replace("transfer_back_to_", "")
-                target_agent = agent_instances.get(target)
+        # Pass 1: Create instances
+        for key, cfg in source_config.items():
+            agent_instances[key] = Agent(
+                name=cfg["name"],
+                instructions=cfg["instructions"],
+                model=cfg["model"],
+            )
+            
+        # Pass 2: Bind tools and handoffs
+        for key, cfg in source_config.items():
+            agent = agent_instances[key]
+            tool_list = []
+            handoff_list = []
+            
+            # Helper to find agent by name or key
+            def find_agent(target_name):
+                 # Try key match
+                 if target_name in agent_instances: return agent_instances[target_name]
+                 # Try name match
+                 for a in agent_instances.values():
+                     if a.name == target_name: return a
+                 return None
+
+            for t_name in cfg.get("tools", []):
+                if t_name in TOOL_REGISTRY:
+                    tool_list.append(TOOL_REGISTRY[t_name])
+                elif t_name.startswith("transfer_to_"):
+                    # Extract target name (e.g. "order_agent" from "transfer_to_order_agent")
+                    target_key = t_name.replace("transfer_to_", "")
+                    target_agent = find_agent(target_key)
+                    if target_agent:
+                        handoff_list.append(target_agent)
+                elif t_name.startswith("transfer_back_to_"):
+                     target_key = t_name.replace("transfer_back_to_", "")
+                     target_agent = find_agent(target_key)
+                     if target_agent:
+                        handoff_list.append(target_agent)
+
+            # Also support explicit "handoffs" key if present
+            for h_key in cfg.get("handoffs", []):
+                target_agent = find_agent(h_key)
                 if target_agent:
                     handoff_list.append(target_agent)
-                else:
-                    print(f"Warning: Handoff target '{target}' not found in agent_instances")
-                
-        agent.tools = tool_list
-        agent.handoffs = handoff_list
+                    
+            agent.tools = tool_list
+            agent.handoffs = handoff_list
 
-    # Get entry agent (orchestrator)
-    if "orchestrator" not in agent_instances:
-        # Fallback or Error
-        # raise HTTPException(status_code=500, detail="Orchestrator agent missing in config")
-        # Fallback to creating a dummy one?
-        entry_agent = Agent(name="Fallback", instructions="No configuration found.", model="gpt-4o-mini")
-    else:
-        entry_agent = agent_instances["orchestrator"]
+        # Pick Entry Agent
+        if "orchestrator" in agent_instances:
+            entry_agent = agent_instances["orchestrator"]
+        elif "sales_agent" in agent_instances:
+            entry_agent = agent_instances["sales_agent"]
+        elif agent_instances:
+            entry_agent = list(agent_instances.values())[0]
+        else:
+             # Should not happen if DEFAULT_AGENTS is populated
+             raise HTTPException(status_code=500, detail="No agents configured")
 
-    # 3. Prepare Input
-    # 3. Prepare Input
-    # OPTIMIZATION: We don't strictly need OpenAI Vision to search.
-    # We just need the Agent to know there is an image URL so it can call the tool.
-    # We apppend the URL to the text.
-    combined_text = request.text
-    if request.attachments:
-        for att in request.attachments:
-            if att.type == "image":
-                 combined_text += f"\n\n[User uploaded image: {att.url}]"
-            # Handle other types if needed
-    
-    messages = [{"role": "user", "content": combined_text}]
-    
-    # 4. Run Agent
-    start_time = __import__("time").time()
-    # Revert max_turns to 10 as requested
-    result = await Runner.run(entry_agent, input=messages, max_turns=10)
-    final_reply = result.final_output
-    
-    latency = int((__import__("time").time() - start_time) * 1000)
+        # 5. Prepare Messages
+        messages = []
+        if request.chat_history:
+            for msg in request.chat_history:
+                messages.append({"role": msg.role, "content": msg.content})
 
-    # 5. Log Run
-    run_service = AIRunService(db)
-    await run_service.create_run(
-        conversation_id=conversation.id,
-        client_id=conversation.client_id,
-        model=entry_agent.model,
-        request_role=request.sender_type,
-        status=RunStatus.SUCCESS,
-        request_summary=request.text[:500],
-        response_summary=final_reply[:500] if final_reply else None,
-        latency_ms=latency
-    )
+        # Handle Attachments (Legacy Strategy: Concatenation)
+        combined_text = request.text
+        if request.attachments:
+            for att in request.attachments:
+                if att.type == "image":
+                    combined_text += f"\n[User uploaded image: {att.url}]"
+                elif att.type == "file":
+                    combined_text += f"\n[User uploaded file: {att.url}]"
+        
+        messages.append({"role": "user", "content": combined_text})
 
-    # 6. Update State
-    state = await service.get_agent_state(conversation.id)
-    state["last_message"] = request.text
-    state["last_reply"] = final_reply
-    await service.update_agent_state(conversation.id, state)
+        # 6. Run Agent
+        print(f"DEBUG: Running agent {entry_agent.name} with {len(messages)} messages")
+        start_time = __import__("time").time()
+        
+        result = await Runner.run(
+            entry_agent,
+            input=messages,
+            max_turns=10,
+            context=client_context
+        )
+        
+        latency_ms = int((__import__("time").time() - start_time) * 1000)
 
-    agent_name = getattr(result.last_agent, "name", str(result.last_agent))
+        # 7. Log Run & Update State
+        run_service = AIRunService(db)
+        await run_service.create_run(
+            conversation_id=conversation.id,
+            client_id=conversation.client_id,
+            model=entry_agent.model,
+            request_role=request.sender_type,
+            status=RunStatus.SUCCESS,
+            request_summary=request.text[:500],
+            response_summary=result.final_output[:500] if result.final_output else None,
+            latency_ms=latency_ms
+        )
+        
+        # Update conversation state
+        state = await service.get_agent_state(conversation.id)
+        if not state: state = {}
+        state["last_message"] = request.text
+        state["last_reply"] = result.final_output
+        await service.update_agent_state(conversation.id, state)
 
-    return AIMessageResponse(
-        reply_text=final_reply,
-        conversation_id=conversation.id,
-        metadata={"model": entry_agent.model, "agent": agent_name}
-    )
+        return AIMessageResponse(
+            reply_text=result.final_output or "No reply generated.",
+            conversation_id=conversation.id,
+            metadata={
+                "model": entry_agent.model,
+                "agent": getattr(result, "agent_name", entry_agent.name),
+                "input_tokens": getattr(result.usage, "input_tokens", 0) if hasattr(result, "usage") else 0,
+                "output_tokens": getattr(result.usage, "output_tokens", 0) if hasattr(result, "usage") else 0
+            }
+        )
+
+    except Exception as e:
+        import traceback
+        error_msg = f"ERROR in ai_message: {str(e)}"
+        print(error_msg)
+        with open("debug_error.log", "a") as f:
+            f.write(error_msg + "\n")
+            traceback.print_exc(file=f)
+        raise HTTPException(status_code=500, detail=str(e))

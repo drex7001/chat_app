@@ -73,6 +73,15 @@ export const uploadFile = async (file: File) => {
     return response.data; // { url, filename, content_type }
 };
 
+export const uploadPolicyDocument = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post('/api/v1/uploads/policy-document', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data; // { name, content, original_filename }
+};
+
 export const sendMessage = async (payload: {
     message_id: string;
     thread_id: string;
@@ -81,9 +90,19 @@ export const sendMessage = async (payload: {
     attachments?: { url: string; type: string }[];
     app_name?: string;
     sender_type?: string;
+    chat_history?: { role: string; content: string }[];
 }) => {
     const response = await api.post('/ai/message', payload);
     return response.data;
+};
+
+export const transcribeAudio = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await api.post('/api/v1/uploads/transcribe', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data; // { text, language }
 };
 
 export default api;
