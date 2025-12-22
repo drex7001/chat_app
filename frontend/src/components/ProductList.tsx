@@ -22,6 +22,8 @@ const ProductList: React.FC<ProductListProps> = ({ clientId }) => {
     const [searchUrl, setSearchUrl] = useState('');
 
     const [availableStores, setAvailableStores] = useState<{ id: number, name: string }[]>([]);
+    const [invalidStores, setInvalidStores] = useState<{ id: number, name: string, error: string }[]>([]);
+    const [apiError, setApiError] = useState<string | null>(null);
     const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
     const [selectedImageIndex, setSelectedImageIndex] = useState(0);
     const [syncStatus, setSyncStatus] = useState<{ is_synced: boolean, vector_count: number } | null>(null);
@@ -33,17 +35,32 @@ const ProductList: React.FC<ProductListProps> = ({ clientId }) => {
 
     const loadProducts = async () => {
         setLoading(true);
+        setApiError(null);
         try {
             const data = await getProducts(clientId, storeId, cursor);
             setProducts(data.products || []);
+
+            // Handle available stores
             if (data.available_stores) {
                 setAvailableStores(data.available_stores);
-                // If no store selected, set the first one returned by backend logic
                 if (!storeId && data.available_stores.length > 0) {
                     setStoreId(data.store_id);
                 }
             }
-            // TODO: handle pagination cursors from data
+
+            // Handle invalid stores - show warning
+            if (data.invalid_stores?.length > 0) {
+                setInvalidStores(data.invalid_stores);
+                toast.warning(`${data.invalid_stores.length} store(s) have invalid credentials`);
+            } else {
+                setInvalidStores([]);
+            }
+
+            // Handle API-level error (e.g., all stores invalid)
+            if (data.error) {
+                setApiError(data.error);
+                toast.error(data.error);
+            }
         } catch (error) {
             toast.error("Failed to load products");
             console.error(error);
@@ -240,8 +257,26 @@ const ProductList: React.FC<ProductListProps> = ({ clientId }) => {
                         </div>
                     ))}
                     {products.length === 0 && (
-                        <div className="col-span-full py-20 text-center text-gray-400 bg-gray-50 rounded-xl border border-dashed">
-                            No products found. Select a store or sync.
+                        <div className="col-span-full py-12 text-center bg-gray-50 rounded-xl border border-dashed space-y-4">
+                            {apiError ? (
+                                <div className="text-red-600 font-medium">
+                                    <span className="text-2xl">⚠️</span>
+                                    <p className="mt-2">{apiError}</p>
+                                </div>
+                            ) : (
+                                <p className="text-gray-400">No products found. Select a store or sync.</p>
+                            )}
+
+                            {invalidStores.length > 0 && (
+                                <div className="mt-4 text-sm text-amber-700 bg-amber-50 rounded-lg p-4 mx-auto max-w-md">
+                                    <p className="font-semibold mb-2">⚠️ Stores with invalid credentials:</p>
+                                    <ul className="text-left space-y-1">
+                                        {invalidStores.map(store => (
+                                            <li key={store.id}>• {store.name}: {store.error}</li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

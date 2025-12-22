@@ -20,6 +20,18 @@ class ShopifyClient:
     def _clear_session(self):
         shopify.ShopifyResource.clear_session()
 
+    def validate_credentials(self) -> bool:
+        """Quick check if access token is valid by fetching shop info."""
+        self._activate_session()
+        try:
+            shop = shopify.Shop.current()
+            return shop is not None
+        except Exception as e:
+            print(f"[WARN] Storefront validation failed for {self.shop_url}: {e}")
+            return False
+        finally:
+            self._clear_session()
+
     def get_products(self, limit: int = 10, cursor: Optional[str] = None) -> List[ShopifyProduct]:
         """
         Fetch products using REST/GraphQL. 

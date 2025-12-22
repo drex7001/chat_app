@@ -53,8 +53,9 @@ async def get_products(
     """
     Get products for a client. 
     1. Fetch Creds from Admin.
-    2. Select specific store (or default to first).
-    3. Call Shopify.
+    2. Validate all stores upfront (filter out invalid tokens).
+    3. Select specific store (or default to first valid).
+    4. Call Shopify.
     """
     app_name = await get_client_app_name(db, client_id)
     print(f"[DEBUG] Fetching creds for app: {app_name}")
@@ -63,19 +64,50 @@ async def get_products(
         creds_list = await admin_client.get_shopify_credentials(app_name)
     except Exception as e:
         print(f"[ERROR] Admin Creds Fetch Failed: {e}")
-        # Helpful message for user
-        raise HTTPException(status_code=502, detail=f"Failed to fetch credentials from Admin API. Check backend logs. Error: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch credentials from Admin API. Error: {str(e)}")
     
     if not creds_list:
         raise HTTPException(status_code=404, detail="No shopify credentials found for client")
     
-    # Select Store
+    # Validate all storefronts upfront
+    valid_stores = []
+    invalid_stores = []
+    valid_creds = []
+    
+    for creds in creds_list:
+        try:
+            client = ShopifyClient(creds)
+            if client.validate_credentials():
+                valid_stores.append({"id": creds.id, "name": creds.name, "valid": True})
+                valid_creds.append(creds)
+            else:
+                invalid_stores.append({"id": creds.id, "name": creds.name, "error": "Invalid credentials"})
+                print(f"[WARN] Store {creds.name} ({creds.id}) has invalid credentials")
+        except Exception as e:
+            invalid_stores.append({"id": creds.id, "name": creds.name, "error": str(e)})
+            print(f"[WARN] Store {creds.name} ({creds.id}) validation failed: {e}")
+    
+    # If no valid stores, return partial response with store info
+    if not valid_stores:
+        return {
+            "products": [],
+            "store_id": None,
+            "store_name": None,
+            "available_stores": valid_stores,
+            "invalid_stores": invalid_stores,
+            "error": "No valid storefronts available. All stores have invalid credentials."
+        }
+    
+    # Select Store (prefer requested if valid, fallback to first valid)
     selected_cred = None
     if store_id:
-        selected_cred = next((c for c in creds_list if c.id == store_id), None)
+        selected_cred = next((c for c in valid_creds if c.id == store_id), None)
+        if not selected_cred:
+            # Requested store is invalid, notify but continue with fallback
+            print(f"[WARN] Requested store {store_id} is invalid or not found, falling back...")
     
     if not selected_cred:
-        selected_cred = creds_list[0] # Default to first
+        selected_cred = valid_creds[0]  # Default to first valid
         
     # Call Shopify
     try:
@@ -87,13 +119,22 @@ async def get_products(
             "products": products, 
             "store_id": selected_cred.id, 
             "store_name": selected_cred.name,
-            "available_stores": [{"id": c.id, "name": c.name} for c in creds_list]
+            "available_stores": valid_stores,
+            "invalid_stores": invalid_stores
         }
     except Exception as e:
         import traceback
         traceback.print_exc()
         print(f"[ERROR] Shopify Data Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Shopify Error: {str(e)}")
+        # Still return store info so frontend can try another store
+        return {
+            "products": [],
+            "store_id": selected_cred.id,
+            "store_name": selected_cred.name,
+            "available_stores": valid_stores,
+            "invalid_stores": invalid_stores,
+            "error": f"Failed to fetch products: {str(e)}"
+        }
 
 @router.post("/{client_id}/products/sync")
 async def trigger_sync(
