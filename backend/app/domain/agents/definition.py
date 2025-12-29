@@ -5,6 +5,8 @@ from app.services.sync_service import sync_service
 from app.domain.admin.client import admin_client
 from app.domain.shopify.client import ShopifyClient
 from app.domain.agents.context import ClientContext
+from app.services.tracking_service import tracking_service
+from app.core.config import settings
 # from app.core.llm import llm_client
 
 # --- Tool Functions ---
@@ -175,6 +177,79 @@ def transfer_to_human(ctx: RunContextWrapper[ClientContext]):
     """Transfer the conversation to a human agent when customer explicitly requests human support."""
     return "HANDOFF_TO_HUMAN: Customer has requested to speak with a human agent. The conversation will be transferred to a human support representative who will assist shortly."
 
+
+@function_tool
+async def track_order(ctx: RunContextWrapper[ClientContext], order_number: str = "", contact: str = ""):
+    """
+    Track an order using order number and customer contact (email or phone).
+    
+    Args:
+        order_number: The order number to track. If not provided, uses context.
+        contact: Customer email or phone. If not provided, uses context.
+    
+    Returns:
+        Formatted tracking information with item-wise status and timeline.
+    """
+    # Debug logging
+    print(f"DEBUG track_order: Received order_number='{order_number}', contact='{contact}'")
+    print(f"DEBUG track_order: Context - order_number={ctx.context.order_number}, email={ctx.context.customer_email}, phone={ctx.context.customer_phone}")
+    
+    # Get order number - prefer context, fallback to parameter
+    final_order_number = ctx.context.order_number or order_number
+    
+    # Get contact - ALWAYS prefer context values over parameters
+    # This is because the AI might pass masked values from system message
+    # Context has the real, unmasked values
+    final_contact = None
+    
+    # First try context (unmasked values)
+    if ctx.context.customer_email:
+        final_contact = ctx.context.customer_email
+        print(f"DEBUG track_order: Using context email: {final_contact}")
+    elif ctx.context.customer_phone:
+        final_contact = ctx.context.customer_phone
+        print(f"DEBUG track_order: Using context phone: {final_contact}")
+    # Only use passed contact if context has nothing AND it's not masked
+    elif contact and "***" not in contact:
+        final_contact = contact
+        print(f"DEBUG track_order: Using parameter contact: {final_contact}")
+    
+    tracking_key = ctx.context.tracking_key or settings.TRACKING_KEY
+    app_name = ctx.context.app_name
+    
+    print(f"DEBUG track_order: Final values - order_number='{final_order_number}', contact='{final_contact}', app_name='{app_name}'")
+    print(f"DEBUG track_order: tracking_key present = {bool(tracking_key)}")
+    
+    # Validate required fields
+    if not final_order_number:
+        return "I need an order number to track your order. Could you please provide your order number?"
+    
+    if not final_contact:
+        return "I need your email address or phone number to look up your order. Could you please provide either one?"
+    
+    if not tracking_key:
+        print("ERROR track_order: No tracking_key configured!")
+        return "I'm sorry, order tracking is not configured for this store. Please contact support for order status updates."
+    
+    # Call tracking API
+    print(f"DEBUG track_order: Calling tracking API...")
+    response = await tracking_service.track_order(
+        app_name=app_name,
+        order_number=final_order_number,
+        contact=final_contact,
+        tracking_key=tracking_key
+    )
+    
+    print(f"DEBUG track_order: API response success={response.get('success')}")
+    if not response.get('success'):
+        print(f"DEBUG track_order: API error - {response.get('message', 'Unknown')}")
+    
+    # Format and return response
+    result = tracking_service.format_tracking_response(response)
+    print(f"DEBUG track_order: Formatted result length = {len(result)} chars")
+    return result
+
+
 TOOL_REGISTRY = {
     "get_order_details": get_order_details,
     "kb_search": kb_search,
@@ -182,6 +257,7 @@ TOOL_REGISTRY = {
     "product_search_by_image": product_search_by_image,
     "get_product_details": get_product_details,
     "transfer_to_human": transfer_to_human,
+    "track_order": track_order,
 }
 
 # We need separate handoff resolution in AI service or use a factory.
@@ -204,19 +280,24 @@ DEFAULT_AGENTS = {
         "role": "specialist",
         "instructions": """You are the Order Specialist.
     - You can view order details with `get_order_details`.
+    - You can track order status with `track_order` - this gives item-wise tracking with timeline.
     - You can PROPOSE cancellations (but cannot execute them directly yet).
+    - If customer asks about tracking/status, use `track_order` first.
+    - If order number or contact is not available in context, ask the customer for it.
     - If the user has a general question, handoff back to `Orchestrator`.""",
         "model": "gpt-4o-mini",
-        "tools": ["get_order_details", "transfer_back_to_orchestrator"]
+        "tools": ["get_order_details", "track_order", "transfer_back_to_orchestrator"]
     },
     "shipping_agent": {
         "name": "ShippingAgent",
         "role": "specialist",
         "instructions": """You are the Shipping Specialist.
-    - You check status with `get_order_details`.
-    - You handle address changes.""",
+    - Use `track_order` to get detailed item-wise tracking with courier info and timeline.
+    - Check customer context for order number and email/phone - if missing, ask the customer.
+    - You handle address changes.
+    - Explain tracking status clearly: Processing, Packaging, Dispatched, Delivered, etc.""",
         "model": "gpt-4o-mini",
-        "tools": ["get_order_details", "transfer_back_to_orchestrator"]
+        "tools": ["track_order", "transfer_back_to_orchestrator"]
     },
     "product_agent": {
         "name": "ProductAgent",

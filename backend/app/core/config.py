@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # Zilliz Support (Users often use these names)
     ZILLIZ_API_URL: str = ""
     ZILLIZ_API_KEY: str = ""
+    
+    # Order Tracking API
+    TRACKING_API_URL: str = "https://track.siardigital.com/api/track"
+    TRACKING_KEY: str = "1|yT41RPHPvnY6GAXD43nNtU18D1QmKTWqZrU8ADjWb7f9849e"  # Bearer token for tracking API
 
     def model_post_init(self, __context):
         if self.ZILLIZ_API_URL:

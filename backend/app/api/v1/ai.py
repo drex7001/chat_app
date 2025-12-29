@@ -9,6 +9,8 @@ from app.domain.ai_runs.service import AIRunService
 from app.domain.ai_runs.models import RunStatus
 from app.domain.agents.definition import TOOL_REGISTRY, DEFAULT_AGENTS
 from app.domain.agents.context import ClientContext
+from app.core.pii_utils import mask_email, mask_phone, redact_pii_for_log
+from app.core.config import settings
 from agents import Runner
 import json
 
@@ -41,10 +43,39 @@ async def ai_message(
         # 2. Get/Create Conversation
         conversation = await service.get_or_create_conversation(request.thread_id, client.external_id)
 
-        # 3. Context
+        # 3. Extract customer and order context from request
+        customer_email = None
+        customer_phone = None
+        customer_name = None
+        order_number = None
+        order_data = None
+        
+        if request.customer:
+            customer_email = request.customer.email
+            customer_phone = request.customer.phone
+            customer_name = request.customer.name
+        
+        if request.order:
+            order_number = request.order.order_number
+            order_data = request.order.model_dump()
+        
+        # Get tracking key from client config or settings
+        tracking_key = None
+        if client.config:
+            tracking_key = client.config.get("tracking_key") or client.config.get("TRACKING_KEY")
+        if not tracking_key:
+            tracking_key = settings.TRACKING_KEY
+
+        # 4. Build ClientContext with customer/order data
         client_context = ClientContext(
             app_name=client.external_id,
-            policies=client.policies or {}
+            policies=client.policies or {},
+            customer_email=customer_email,
+            customer_phone=customer_phone,
+            customer_name=customer_name,
+            order_number=order_number,
+            order_data=order_data,
+            tracking_key=tracking_key
         )
 
         # 4. Reconstruct Agents from Config (Dynamic Loading)
@@ -128,6 +159,30 @@ async def ai_message(
                     combined_text += f"\n[User uploaded file: {att.url}]"
         
         messages.append({"role": "user", "content": combined_text})
+        
+        # 5.5 Inject customer context as system message if available
+        customer_context_parts = []
+        if customer_name or customer_email or customer_phone:
+            customer_context_parts.append("[CUSTOMER CONTEXT]")
+            if customer_name:
+                customer_context_parts.append(f"- Customer Name: {customer_name}")
+            if customer_email:
+                customer_context_parts.append(f"- Email: {mask_email(customer_email)} (available for tracking)")
+            if customer_phone:
+                customer_context_parts.append(f"- Phone: {mask_phone(customer_phone)} (available for tracking)")
+        
+        if order_number:
+            customer_context_parts.append(f"- Latest Order: {order_number}")
+        
+        if customer_context_parts:
+            customer_context_parts.append("")
+            customer_context_parts.append("You have access to this customer information. Use it when calling tools like track_order.")
+            customer_context_parts.append("If required information is missing and user asks about order tracking, politely ask for order number or email/phone.")
+            
+            # Prepend as system message
+            context_message = "\n".join(customer_context_parts)
+            messages.insert(0, {"role": "system", "content": context_message})
+            print(f"DEBUG: Injected customer context: {context_message}")
 
         # 6. Run Agent
         print(f"DEBUG: Running agent {entry_agent.name} with {len(messages)} messages")
@@ -136,7 +191,7 @@ async def ai_message(
         result = await Runner.run(
             entry_agent,
             input=messages,
-            max_turns=10,
+            max_turns=30,
             context=client_context
         )
         
