@@ -160,15 +160,27 @@ class TrackingService:
         # Get shipment info
         shipments = order.get("shipments", {})
         courier_name = ""
+        tracking_no = ""
+        tracking_url = ""
+        
         for awb, shipment in shipments.items():
             c_name = shipment.get("courier_name", "")
             if c_name and c_name.lower() != "internal":
                 courier_name = c_name
+                tracking_no = shipment.get("tracking_no", "")
+                tracking_url = shipment.get("tracking_url", "")
                 break
         
         # Build response based on status
         lines = []
         
+        # Helper to add tracking info
+        def add_tracking_info():
+            if tracking_no:
+                lines.append(f"Tracking Number: {tracking_no}")
+            if tracking_url:
+                lines.append(f"Track here: {tracking_url}")
+
         # Status-specific greeting and main message
         if primary_status == "110":  # Delivered
             lines.append(f"Hi {customer_name}!")
@@ -197,6 +209,9 @@ class TrackingService:
             lines.append(f"Your order {order_number} is on its way!")
             if courier_name:
                 lines.append(f"It's being delivered by {courier_name}.")
+            
+            add_tracking_info()
+            
             lines.append("")
             lines.append("You should receive it soon. I'll keep you updated on the delivery status!")
             
@@ -206,6 +221,9 @@ class TrackingService:
             lines.append(f"Your order {order_number} is with the delivery partner and on its way to you!")
             if courier_name:
                 lines.append(f"Courier: {courier_name}")
+            
+            add_tracking_info()
+
             lines.append("")
             lines.append("It should reach you very soon!")
             
@@ -228,7 +246,7 @@ class TrackingService:
             lines.append("")
             lines.append(f"Your order {order_number} is currently pending approval.")
             lines.append("")
-            lines.append("Our team is reviewing it and you'll receive an update soon. If you have any questions, feel free to ask!")
+            lines.append("Our team is reviewing it and it will be processed soon. If you have any questions, feel free to ask!")
             
         else:
             # Generic fallback
@@ -239,6 +257,11 @@ class TrackingService:
             for item in item_statuses:
                 status_display = STATUS_CODES.get(item["status_code"], item["category"])
                 lines.append(f"- {item['name']}: {status_display}")
+            
+            # If we have tracking info on a generic status (e.g. unknown status code but dispatched), add it
+            if tracking_no or tracking_url:
+                add_tracking_info()
+
             lines.append("")
             lines.append("Let me know if you need any other information!")
         
