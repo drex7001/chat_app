@@ -1,0 +1,35 @@
+ERROR in ai_message: object MagicMock can't be used in 'await' expression
+Traceback (most recent call last):
+  File "c:\Users\Ayodhya\Desktop\chat-app\backend\app\api\v1\ai.py", line 233, in ai_message
+    await run_service.create_run(
+TypeError: object MagicMock can't be used in 'await' expression
+ERROR in ai_message: object MagicMock can't be used in 'await' expression
+Traceback (most recent call last):
+  File "c:\Users\Ayodhya\Desktop\chat-app\backend\app\api\v1\ai.py", line 233, in ai_message
+    await run_service.create_run(
+TypeError: object MagicMock can't be used in 'await' expression
+ERROR in ai_message: object MagicMock can't be used in 'await' expression
+Traceback (most recent call last):
+  File "c:\Users\Ayodhya\Desktop\chat-app\backend\app\api\v1\ai.py", line 233, in ai_message
+    await run_service.create_run(
+TypeError: object MagicMock can't be used in 'await' expression
+ERROR in ai_message: object MagicMock can't be used in 'await' expression
+Traceback (most recent call last):
+  File "c:\Users\Ayodhya\Desktop\chat-app\backend\app\api\v1\ai.py", line 233, in ai_message
+    await run_service.create_run(
+TypeError: object MagicMock can't be used in 'await' expression
+ERROR in ai_message: 1 validation error for AIMessageResponse
+conversation_id
+  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='conv-123', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.11/v/int_parsing
+Traceback (most recent call last):
+  File "c:\Users\Ayodhya\Desktop\chat-app\backend\app\api\v1\ai.py", line 259, in ai_message
+    return AIMessageResponse(
+           ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Ayodhya\anaconda3\Lib\site-packages\pydantic\main.py", line 253, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for AIMessageResponse
+conversation_id
+  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='conv-123', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.11/v/int_parsing

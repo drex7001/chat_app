@@ -7,7 +7,7 @@ from app.domain.clients.service import ClientService
 from app.domain.crm.client import crm_client
 from app.domain.ai_runs.service import AIRunService
 from app.domain.ai_runs.models import RunStatus
-from app.domain.agents.definition import TOOL_REGISTRY, DEFAULT_AGENTS
+from app.domain.agents.definition import NEW_ARCHITECTURE_AGENTS, TOOL_REGISTRY
 from app.domain.agents.context import ClientContext
 from app.core.pii_utils import mask_email, mask_phone, redact_pii_for_log
 from app.core.config import settings
@@ -67,6 +67,16 @@ async def ai_message(
             tracking_key = settings.TRACKING_KEY
 
         # 4. Build ClientContext with customer/order data
+        # 4. State Hydration (Load from DB)
+        agent_state = await service.get_agent_state(conversation.id)
+        if not agent_state: agent_state = {}
+        
+        pending_otp = agent_state.get("pending_otp")
+        
+        # 5. Build ClientContext with customer/order data AND State
+        is_authenticated = bool(customer_email or customer_phone)
+        print(f"DEBUG: Auth Status: {is_authenticated} (Email: {customer_email}, Phone: {customer_phone})")
+
         client_context = ClientContext(
             app_name=client.external_id,
             policies=client.policies or {},
@@ -75,15 +85,19 @@ async def ai_message(
             customer_name=customer_name,
             order_number=order_number,
             order_data=order_data,
-            tracking_key=tracking_key
+            tracking_key=tracking_key,
+            # New Architecture State
+            pending_otp=pending_otp,
+            is_authenticated=is_authenticated
         )
 
         # 4. Reconstruct Agents from Config (Dynamic Loading)
         from agents import Agent
         
         agent_instances = {}
-        # Use client config if available, else fallback to DEFAULT_AGENTS
-        source_config = client.config.get("agents", {}) if client.config and client.config.get("agents") else DEFAULT_AGENTS
+        # Determine Source Config
+        # Always use the new architecture
+        source_config = NEW_ARCHITECTURE_AGENTS
         
         # Pass 1: Create instances
         for key, cfg in source_config.items():
@@ -123,7 +137,7 @@ async def ai_message(
                      if target_agent:
                         handoff_list.append(target_agent)
 
-            # Also support explicit "handoffs" key if present
+            # Also support explicit "handoffs"
             for h_key in cfg.get("handoffs", []):
                 target_agent = find_agent(h_key)
                 if target_agent:
@@ -132,15 +146,26 @@ async def ai_message(
             agent.tools = tool_list
             agent.handoffs = handoff_list
 
-        # Pick Entry Agent
-        if "orchestrator" in agent_instances:
-            entry_agent = agent_instances["orchestrator"]
-        elif "sales_agent" in agent_instances:
-            entry_agent = agent_instances["sales_agent"]
-        elif agent_instances:
-            entry_agent = list(agent_instances.values())[0]
-        else:
-             # Should not happen if DEFAULT_AGENTS is populated
+        # 3. Pick Entry Agent
+        #    If we have a "sticky" agent from history, try to use it. 
+        #    Otherwise, default to 'triage_agent'.
+        
+        entry_agent = None
+
+        # Special Case: Pending OTP -> Force Ops Agent
+        if client_context.pending_otp and "ops_agent" in agent_instances:
+             print("DEBUG: Sticky Routing -> Ops Agent (Pending OTP)")
+             entry_agent = agent_instances["ops_agent"]
+
+        # Fallback to Triage if no entry agent selected
+        if not entry_agent:
+            if "triage_agent" in agent_instances:
+                entry_agent = agent_instances["triage_agent"]
+            else:
+                # Fallback for safety, though Triage should always be there in new arch
+                entry_agent = next(iter(agent_instances.values()))
+        
+        if not entry_agent:
              raise HTTPException(status_code=500, detail="No agents configured")
 
         # 5. Prepare Messages
@@ -211,11 +236,19 @@ async def ai_message(
         )
         
         # Update conversation state
-        state = await service.get_agent_state(conversation.id)
-        if not state: state = {}
-        state["last_message"] = request.text
-        state["last_reply"] = result.final_output
-        await service.update_agent_state(conversation.id, state)
+        # Update conversation state
+        if not agent_state: agent_state = {}
+        agent_state["last_message"] = request.text
+        agent_state["last_reply"] = result.final_output
+        
+        # Persist OTP State back to DB
+        if client_context.pending_otp:
+             agent_state["pending_otp"] = client_context.pending_otp
+        elif "pending_otp" in agent_state:
+             # If it was cleared in context, clear in DB
+             del agent_state["pending_otp"]
+        
+        await service.update_agent_state(conversation.id, agent_state)
 
         return AIMessageResponse(
             reply_text=result.final_output or "No reply generated.",

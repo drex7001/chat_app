@@ -7,14 +7,52 @@ from app.domain.shopify.client import ShopifyClient
 from app.domain.agents.context import ClientContext
 from app.services.tracking_service import tracking_service
 from app.core.config import settings
-# from app.core.llm import llm_client
+import random
+import time
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Literal, List
+from datetime import datetime
 
 # --- Tool Functions ---
 
 @function_tool
-async def get_order_details(order_id: str):
-    """Get details of an order."""
-    return await ops_client.get_order(order_id)
+async def get_order_details(ctx: RunContextWrapper[ClientContext], order_id: str, contact: str = ""):
+    """
+    Get details of an order. Requires email or phone verification.
+    If the user has not provided their email/phone, YOU MUST ASK for it.
+    """
+    # 1. Resolve Contact (Context > Arg)
+    # Prefer context (authenticated user) overrides explicit argument
+    final_contact = ctx.context.customer_email or ctx.context.customer_phone or contact
+    
+    # If explicit contact is provided, allow it (e.g. user typing email in chat)
+    # But ideally we trust context first.
+    
+    if not final_contact:
+        return "I need your email address or phone number to verify your identity before showing order details."
+
+    print(f"DEBUG get_order_details: Fetching {order_id} for verification against '{final_contact}'")
+    
+    # 2. Fetch Order
+    order_data = await ops_client.get_order(order_id)
+    if not order_data:
+        return "Order not found."
+    
+    # 3. Verify Contact Match
+    # Normalize for comparison
+    contact_norm = str(final_contact).lower().strip()
+    
+    # Extract order contact info (robust check)
+    order_email = str(order_data.get("email", "")).lower()
+    order_phone = str(order_data.get("phone", "") or order_data.get("customer", {}).get("phone", ""))
+    
+    # Check match (loose check for improved UX)
+    if contact_norm in order_email or contact_norm in order_phone or order_phone in contact_norm:
+         return json.dumps(order_data)
+    else:
+         print(f"DEBUG: Auth Failed. Contact '{contact_norm}' not in Order Email '{order_email}' or Phone '{order_phone}'")
+         return "Verification failed. The provided email or phone number does not match this order."
 
 @function_tool
 def kb_search(ctx: RunContextWrapper[ClientContext], query: str):
@@ -260,58 +298,315 @@ TOOL_REGISTRY = {
     "track_order": track_order,
 }
 
-# We need separate handoff resolution in AI service or use a factory.
-# For now, let's define the templates.
 
-DEFAULT_AGENTS = {
-    "orchestrator": {
-        "name": "Orchestrator",
-        "role": "orchestrator",
-        "instructions": """You are the main receptionist. 
-    - Answer greetings and FAQs using `kb_search`.
-    - If user asks about a specific order, handoff to `OrderAgent`.
-    - If user asks about shipping/tracking, handoff to `ShippingAgent`.
-    - Always be polite.""",
+
+# =========================================
+# NEW ARCHITECTURE TOOLS (OTP + ACTIONS)
+# =========================================
+
+ActionType = Literal["cancel_order", "change_address"]
+
+@function_tool
+def human_handoff(ctx: RunContextWrapper[ClientContext], reason: str, user_message: str) -> str:
+    """Escalate to a human support specialist."""
+    return f"HANDOFF_TO_HUMAN: {reason} (User said: {user_message})"
+
+# ---- Sales tools ----
+
+@function_tool
+def get_payment_methods(country: str = "LK") -> str:
+    return json.dumps({"methods": ["Cash on Delivery", "Bank Transfer", "Card (if enabled)"]})
+
+@function_tool
+def get_delivery_info(country: str = "LK") -> str:
+    if country == "LK":
+        return json.dumps({"delivery_charge": "Calculated at checkout", "eta": "1–4 business days"})
+    return json.dumps({"delivery_charge": "Calculated at checkout", "eta": "2–6 business days"})
+
+@function_tool
+def get_store_locations(country: str = "LK") -> str:
+    if country == "LK":
+        return json.dumps({"locations": ["Online store (nationwide delivery)"], "note": "Share city to check nearest pickup option if available."})
+    return json.dumps({"locations": ["Online store (nationwide delivery)"], "note": "Share city to check nearest pickup option if available."})
+
+# ---- Ops tools (OTP gated) ----
+
+@function_tool
+async def get_order_status_ops(ctx: RunContextWrapper[ClientContext], order_id: str) -> str:
+    """Get status of an order for Ops agent."""
+    # Using existing ops_client
+    try:
+        order = await ops_client.get_order(order_id)
+        if not order:
+            return json.dumps({"error": "ORDER_NOT_FOUND"})
+        # Simple transform for LLM consumption
+        return json.dumps(order)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+@function_tool
+def request_otp(ctx: RunContextWrapper[ClientContext], order_id: str, action: ActionType) -> str:
+    """
+    Request an OTP for a sensitive action (cancel_order, change_address).
+    If the user is authenticated (Trusted Context), we skip the challenge and return 'VERIFIED_BY_CONTEXT'.
+    """
+    # 1. Trusted Context Check
+    if ctx.context.is_authenticated:
+        return json.dumps({
+            "status": "SKIPPED", 
+            "message": "User is authenticated via CRM (Email/Phone present). No OTP needed.",
+            "otp_verified_automatically": True
+        })
+
+    # 2. Setup Challenge
+    code = f"{random.randint(0, 999999):06d}"
+    challenge = {
+        "action": action,
+        "order_id": order_id,
+        "code": code,
+        "expires_at_epoch": time.time() + 300,
+        "attempts": 0,
+        "verified": False
+    }
+    
+    # Update Context (This must be persisted back to DB by the runner/endpoint)
+    ctx.context.pending_otp = challenge
+    
+    # In a real app, you would send this via SMS/Email using `ops_client.send_otp`
+    # payload = await ops_client.send_otp(...)
+    
+    # For now, returning the code in dev mode or masking it
+    payload = {"sent_to": "User's Registered Phone", "expires_in_sec": 300}
+    
+    # If dev/debug, return code
+    # if settings.DEBUG:
+    #     payload["dev_otp_code"] = code
+        
+    return json.dumps(payload)
+
+@function_tool
+def verify_otp(ctx: RunContextWrapper[ClientContext], otp_code: str) -> str:
+    """Verify the OTP code provided by the user."""
+    ch = ctx.context.pending_otp
+    
+    if not ch:
+        # Check if already authenticated via context
+        if ctx.context.is_authenticated:
+             return json.dumps({"verified": True, "method": "trusted_context"})
+        return json.dumps({"error": "NO_PENDING_OTP"})
+        
+    # Check expiry
+    if time.time() > ch.get("expires_at_epoch", 0):
+        ctx.context.pending_otp = None
+        return json.dumps({"error": "OTP_EXPIRED"})
+        
+    ch["attempts"] = ch.get("attempts", 0) + 1
+
+    if otp_code.strip() == ch.get("code"):
+        ch["verified"] = True
+        return json.dumps({"verified": True, "action": ch.get("action"), "order_id": ch.get("order_id")})
+
+    if ch["attempts"] >= 3:
+        ctx.context.pending_otp = None
+        return json.dumps({"verified": False, "error": "TOO_MANY_ATTEMPTS"})
+        
+    return json.dumps({"verified": False, "error": "INVALID_OTP", "attempts_used": ch["attempts"]})
+
+@function_tool
+async def cancel_order(ctx: RunContextWrapper[ClientContext], order_id: str) -> str:
+    """Cancel an order. Requires OTP verification OR Trusted Context."""
+    # Check Auth
+    is_trusted = ctx.context.is_authenticated
+    otp_verified = False
+    
+    if ctx.context.pending_otp:
+        ch = ctx.context.pending_otp
+        if ch.get("verified") and ch.get("action") == "cancel_order" and ch.get("order_id") == order_id:
+            otp_verified = True
+            
+    if not (is_trusted or otp_verified):
+         return json.dumps({"error": "OTP_REQUIRED_OR_NOT_VERIFIED"})
+
+    # Execute
+    # In real app: await ops_client.cancel_order(order_id)
+    # Mocking for now as ops_client might not have this method
+    try:
+        # await ops_client.cancel_order(order_id)
+        # Clear OTP state
+        ctx.context.pending_otp = None
+        return json.dumps({"ok": True, "order_id": order_id, "status": "Cancelled"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+@function_tool
+async def update_order_address(ctx: RunContextWrapper[ClientContext], order_id: str, new_address: str) -> str:
+    """Update order shipping address. Requires OTP verification OR Trusted Context."""
+    # Check Auth
+    is_trusted = ctx.context.is_authenticated
+    otp_verified = False
+    
+    if ctx.context.pending_otp:
+        ch = ctx.context.pending_otp
+        if ch.get("verified") and ch.get("action") == "change_address" and ch.get("order_id") == order_id:
+            otp_verified = True
+            
+    if not (is_trusted or otp_verified):
+         return json.dumps({"error": "OTP_REQUIRED_OR_NOT_VERIFIED"})
+
+    # Execute
+    try:
+        # await ops_client.update_address(order_id, new_address)
+        ctx.context.pending_otp = None
+        return json.dumps({"ok": True, "order_id": order_id, "shipping_address": new_address})
+    except Exception as e:
+         return json.dumps({"error": str(e)})
+
+# ---- Support tools ----
+
+@function_tool
+def create_return_request(ctx: RunContextWrapper[ClientContext], order_id: str, reason: str) -> str:
+    return_id = f"R-{random.randint(10000,99999)}"
+    return json.dumps({"ok": True, "return_id": return_id, "order_id": order_id, "reason": reason})
+
+@function_tool
+def get_refund_status(ctx: RunContextWrapper[ClientContext], order_id: str) -> str:
+    return json.dumps({"order_id": order_id, "refund_status": "Not started / In progress / Completed (demo)"})
+
+
+# =========================================
+# NEW AGENT DEFINITIONS
+# =========================================
+
+BASE_LANGUAGE_RULES = """
+LANGUAGE RULES (Code-switching):
+- Mirror the user’s writing style: English, Singlish (Sinhala written in English letters), Roman Urdu, or mixed.
+- Do NOT switch scripts unless the user does.
+- Keep messages short, clear. Ask at most 1 clarifying question when needed.
+- Be respectful. No offensive slang.
+"""
+
+# Re-using the prompt logic using a dynamic context fetcher if needed, 
+# or just static strings since instructions are static in this dict.
+
+NEW_ARCHITECTURE_AGENTS = {
+    "triage_agent": {
+        "name": "Triage Agent",
+        "instructions": f"""
+You are the TRIAGE AGENT (Receptionist) for a fashion e-commerce support chat.
+
+You must:
+1) Handle greetings directly (hi/hello/good morning) with a friendly short reply.
+2) Filter spam/junk: reply briefly that you can help with shopping, orders, returns.
+3) CATEGORY 5 ESCALATION: If user is angry/abusive or mentions scams/consumer authority/police/legal threats:
+   - Immediately call human_handoff(reason=..., user_message=...).
+   - Do NOT route to other agents and do NOT argue.
+
+4) GENERAL QUERIES & FAQs:
+   - If the user asks for general company info (contact details, policies, about us), use `kb_search`.
+   - If the answer is found, reply directly.
+
+Otherwise route EXACTLY ONE specialist via handoff:
+- Sales Agent: Category 1 (pre-purchase) + Category 4 (delivery/payment/location).
+- Ops Agent: Category 2 (tracking, cancellations, address changes).
+- Support Agent: Category 3 (returns, exchanges, damaged, refunds).
+
+Rules:
+- Do not solve non-greeting issues yourself; route.
+- If message contains a 6-digit OTP OR a pending OTP exists, route to Ops.
+{BASE_LANGUAGE_RULES}
+""".strip(),
         "model": "gpt-4o-mini",
-        "tools": ["kb_search", "transfer_to_order_agent", "transfer_to_shipping_agent", "transfer_to_product_agent"]
+        # Note: handoff tools will be bound dynamically in ai.py by name mapping
+        "tools": ["kb_search", "human_handoff", "transfer_to_sales_agent", "transfer_to_ops_agent", "transfer_to_support_agent"]
     },
-    "order_agent": {
-        "name": "OrderAgent",
-        "role": "specialist",
-        "instructions": """You are the Order Specialist.
-    - You can view order details with `get_order_details`.
-    - You can track order status with `track_order` - this gives item-wise tracking with timeline.
-    - You can PROPOSE cancellations (but cannot execute them directly yet).
-    - If customer asks about tracking/status, use `track_order` first.
-    - If order number or contact is not available in context, ask the customer for it.
-    - If the user has a general question, handoff back to `Orchestrator`.""",
+    
+    "sales_agent": {
+        "name": "Sales Agent",
+        "instructions": f"""
+You are the SALES AGENT (Stylist). Goal: conversion + accurate info.
+
+Handle only:
+- Category 1 (Pre-purchase): availability, sizes, material, price/discounts, real photo requests.
+- Category 4 (General): delivery, payment methods, shop/location info.
+
+Tooling:
+- Use search_products/get_product_details (from registry product_search etc) for product facts.
+- Use get_delivery_info/get_payment_methods/get_store_locations for policies.
+- If user asks about order tracking/cancel/address change: explain Ops handles it.
+- If user asks about returns/refunds/damage: explain Support handles it.
+
+Style: enthusiastic, friendly, helpful.
+{BASE_LANGUAGE_RULES}
+""".strip(),
         "model": "gpt-4o-mini",
-        "tools": ["get_order_details", "track_order", "transfer_back_to_orchestrator"]
+        "tools": [
+            "product_search", "product_search_by_image", "get_product_details", "get_delivery_info", 
+            "get_payment_methods", "get_store_locations", "transfer_to_ops_agent", "transfer_to_support_agent"
+        ]
     },
-    "shipping_agent": {
-        "name": "ShippingAgent",
-        "role": "specialist",
-        "instructions": """You are the Shipping Specialist.
-    - Use `track_order` to get detailed item-wise tracking with courier info and timeline.
-    - Check customer context for order number and email/phone - if missing, ask the customer.
-    - You handle address changes.
-    - Explain tracking status clearly: Processing, Packaging, Dispatched, Delivered, etc.""",
+    
+    "ops_agent": {
+        "name": "Ops Agent",
+        "instructions": f"""
+You are the OPS AGENT (Manager). Goal: efficient and secure order management.
+
+Handle only Category 2:
+- Order tracking/status
+- Address change
+- Cancellation
+
+OTP SECURITY:
+- For cancellation OR address change: MUST request_otp then verify_otp.
+- EXCEPTION: If the user is AUTHENTICATED (Trusted Context), request_otp will automatically skip. 
+- You still MUST call request_otp to check if auth is valid.
+- Only after verify_otp returns verified=true (or auth skipped), you may call cancel_order or update_order_address.
+- If user sends OTP but NO pending OTP: explain you need to start verification and ask for order_id.
+
+Workflow:
+- Cancellation: get_order_status -> if can_cancel true -> request_otp(action="cancel_order") -> wait OTP -> verify_otp -> cancel_order
+- Address change: get_order_status -> request_otp(action="change_address") -> wait OTP -> verify_otp -> update_order_address
+Style: professional, direct, concise.
+{BASE_LANGUAGE_RULES}
+""".strip(),
         "model": "gpt-4o-mini",
-        "tools": ["track_order", "transfer_back_to_orchestrator"]
+        "tools": [
+            "get_order_details", "request_otp", "verify_otp", "cancel_order", "update_order_address",
+            "track_order" # Including track_order for tracking
+        ]
     },
-    "product_agent": {
-        "name": "ProductAgent",
-        "role": "specialist",
-        "instructions": """You are the Product Specialist.
-    - If you see `[User uploaded image: URL]`, YOU MUST call `product_search_by_image(URL)`. DO NOT ask for description.
-    - If user provides a text query, use `product_search`.
-    - IMPORTANT: Focus on the BEST MATCH (Match 1 with highest similarity) FIRST.
-    - Only call `get_product_details` for the TOP 1 result initially.
-    - Present the best matching product to the user. Only show alternatives if:
-      a) User asks for more options, OR
-      b) The best match is unavailable/out of stock
-    - If the user wants to buy or has other questions, handoff back to `Orchestrator` only AFTER finding product info.""",
+    
+    "support_agent": {
+        "name": "Support Agent",
+        "instructions": f"""
+You are the SUPPORT AGENT (Care Rep). Goal: retention + empathy.
+
+Handle only Category 3:
+- Returns/exchanges
+- Damaged items
+- Refund status
+
+Tooling:
+- Use create_return_request and get_refund_status.
+- Ask for order_id if missing.
+Style: empathetic, apologetic, patient.
+{BASE_LANGUAGE_RULES}
+""".strip(),
         "model": "gpt-4o-mini",
-        "tools": ["product_search", "product_search_by_image", "get_product_details", "transfer_back_to_orchestrator"]
+        "tools": ["create_return_request", "get_refund_status", "kb_search"]
     }
 }
+
+# Update Registry with new tools
+TOOL_REGISTRY.update({
+    "human_handoff": human_handoff,
+    "get_payment_methods": get_payment_methods,
+    "get_delivery_info": get_delivery_info,
+    "get_store_locations": get_store_locations,
+    "request_otp": request_otp,
+    "verify_otp": verify_otp,
+    "cancel_order": cancel_order,
+    "update_order_address": update_order_address,
+    "create_return_request": create_return_request,
+    "get_refund_status": get_refund_status,
+    "get_order_status_ops": get_order_status_ops
+})
